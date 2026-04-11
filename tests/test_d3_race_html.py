@@ -1,8 +1,21 @@
-"""Smoke tests for make_d3_race_html — the HTML template builder.
+"""
+Smoke-тесты шаблона ``make_d3_race_html``.
 
-We don't try to render the D3 animation here (that needs a browser). Instead
-we verify the template produces valid-looking HTML with the right knobs wired
-through the payload."""
+Реальную D3-анимацию тут не рендерим (нужен браузер) — вместо этого
+проверяем, что HTML собран корректно и все параметры из Python доходят
+до клиентского DATA. Покрываем:
+    • базовую структуру (есть <svg>, подключён d3, плейсхолдеры заменены),
+    • флаг вертикального layout доезжает до body-класса и высота 1920,
+    • intro_lines рендерятся server-side в DOM — нужно, чтобы intro-слайд
+      был виден с первого кадра и не мигал поверх гонки (см. баг flash
+      перед intro),
+    • HTML-escape опасных символов в intro-строках,
+    • защита от закрытия <script> через ``</script>`` внутри JSON payload
+      (если пользователь передаст такой intro_lines — мы не должны
+      прерывать собственный script-блок),
+    • subtitle принимает список строк,
+    • пустой frames не роняет генератор.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -18,23 +31,27 @@ def _frame(sec: int, **counts: int) -> EventFrame:
     )
 
 
-def test_basic_html_structure() -> None:
+def test_базовая_структура_html() -> None:
     frames = [_frame(0, LLM=1), _frame(1, LLM=1, ML=1), _frame(2, LLM=2, ML=1)]
     html, height = make_d3_race_html(frames, title="Тест", subtitle="подзаголовок")
     assert "<svg" in html
     assert "d3.v7" in html
-    assert "__DATA_JSON__" not in html, "placeholder should be substituted"
+    assert "__DATA_JSON__" not in html, "плейсхолдер должен быть подставлен"
     assert height > 0
 
 
-def test_vertical_layout_flag_reaches_payload() -> None:
+def test_вертикальный_layout_флаг_доходит_до_payload() -> None:
     frames = [_frame(0, LLM=1)]
     html, height = make_d3_race_html(frames, layout="vertical")
-    assert "vertical" in html  # body class or data flag
+    assert "vertical" in html
     assert height == 1920
 
 
-def test_intro_lines_rendered_into_html_and_body_has_intro_class() -> None:
+def test_intro_рендерится_в_html_и_body_получает_класс_has_intro() -> None:
+    """Если intro_lines передан, intro-блок должен быть полностью собран
+    server-side, а body получает класс ``has-intro``. Это нужно, чтобы
+    CSS скрывал гонку и показывал intro с самого первого кадра — без
+    этого возникает баг flash перед intro (мы его видели в ранней версии)."""
     frames = [_frame(0, LLM=1)]
     html, _ = make_d3_race_html(
         frames,
@@ -42,45 +59,54 @@ def test_intro_lines_rendered_into_html_and_body_has_intro_class() -> None:
         autoplay=True,
         hide_controls=True,
     )
-    # Body class drives CSS for first-paint intro visibility
     assert "has-intro" in html
     assert "hide-controls" in html
-    # Intro content is server-rendered so there's no flash before JS runs
     assert "Topic Race" in html
     assert "Группа «Материалы»" in html
 
 
-def test_html_escapes_intro_dangerous_characters() -> None:
+def test_html_экранирует_опасные_символы_в_intro() -> None:
+    """Произвольный intro-текст может содержать HTML-спецсимволы.
+    Они должны превратиться в сущности в видимом DOM, а закрывающий тег
+    ``</script>`` — не появиться как прерыватель нашего <script>-блока."""
     frames = [_frame(0, LLM=1)]
     html, _ = make_d3_race_html(
         frames,
         intro_lines=["<script>alert('xss')</script>"],
     )
-    # In the visible <div id="intro">, angle brackets are HTML-escaped.
+    # В видимом <div id="intro"> угловые скобки экранируются.
     assert "&lt;script&gt;" in html
-    # The raw text also appears inside the embedded JSON payload, which sits
-    # inside a <script> block. The critical escape is the closing tag —
-    # `</script` inside the JSON would prematurely close the outer <script>.
-    # We verify the only </script in the document is the one that legitimately
-    # closes our own block.
+    # Внутри встроенного JSON-блока </script не должен встречаться больше раз,
+    # чем настоящие закрывающие теги (их ровно 2: один для <script src=d3>,
+    # один для нашего inline-скрипта).
     count_close = html.count("</script>")
-    # Our template has exactly one <script src=d3> and one inline <script>
-    # block, so exactly two closing tags total.
-    assert count_close == 2, f"unexpected </script> count: {count_close}"
+    assert count_close == 2, f"ожидал 2 </script>, получили {count_close}"
 
 
-def test_subtitle_can_be_a_list_of_lines() -> None:
+def test_subtitle_принимает_список_строк() -> None:
     frames = [_frame(0, LLM=1)]
     html, _ = make_d3_race_html(
         frames,
         subtitle=["строка 1", "строка 2"],
     )
-    # Both lines should survive into the payload JSON
     assert "строка 1" in html
     assert "строка 2" in html
 
 
-def test_empty_frames_does_not_crash() -> None:
+def test_title_принимает_список_строк() -> None:
+    """Для вертикального Reels title разбит на 2 строки (чтобы длинная
+    «Популярные топики в группе «{group_name}»» не упиралась в правый край).
+    Проверяем, что обе строки доезжают до payload."""
+    frames = [_frame(0, LLM=1)]
+    html, _ = make_d3_race_html(
+        frames,
+        title=["Популярные топики в группе", "«Материалы»"],
+    )
+    assert "Популярные топики в группе" in html
+    assert "«Материалы»" in html
+
+
+def test_пустой_список_frames_не_ломает_генератор() -> None:
     html, height = make_d3_race_html([])
     assert "<svg" in html
     assert height > 0
