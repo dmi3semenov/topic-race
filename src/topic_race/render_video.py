@@ -162,31 +162,64 @@ async def _record_webm(
     return webms[-1]
 
 
+def _fmt_tempo(v: float) -> str:
+    """Format a tempo value for ffmpeg: '2.0', '1.5', '1.3333' — no trailing zeros."""
+    s = f"{v:.4f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        s += ".0"
+    return s
+
+
+def _atempo_chain(tempo: float) -> str:
+    """Return an ffmpeg filter string for atempo. ffmpeg atempo only accepts
+    0.5..2.0 per instance, so for >2x we chain multiple atempo calls."""
+    if tempo <= 0:
+        return ""
+    filters: list[str] = []
+    remaining = tempo
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    if abs(remaining - 1.0) > 1e-3:
+        filters.append(f"atempo={_fmt_tempo(remaining)}")
+    return ",".join(filters)
+
+
 def _mux(
     webm_path: Path,
     audio_path: Path | None,
     audio_start_sec: float,
+    audio_tempo: float,
     output_mp4: Path,
     target_duration_sec: float,
 ) -> None:
     """Convert webm to mp4 (h264) and optionally overlay an audio track.
 
     If audio_path is None, just transcode video. If audio_path is given, trim
-    audio to start at audio_start_sec and cut it at target_duration_sec.
+    audio to start at audio_start_sec, speed up by audio_tempo, and cut at
+    target_duration_sec. Audio is volume-reduced with fade in/out.
     """
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     if output_mp4.exists():
         output_mp4.unlink()
 
     if audio_path and audio_path.exists():
-        # Audio: lower volume + fade in at start + fade out at the end.
+        # Audio filter chain: tempo first (changes timing), then volume + fades.
         fade_out_dur = 2.0
         fade_out_start = max(0.0, target_duration_sec - fade_out_dur)
-        audio_filter = (
-            f"volume=0.55,"
-            f"afade=t=in:st=0:d=0.8,"
-            f"afade=t=out:st={fade_out_start}:d={fade_out_dur}"
-        )
+        filters = []
+        atempo = _atempo_chain(audio_tempo)
+        if atempo:
+            filters.append(atempo)
+        filters.extend([
+            "volume=0.55",
+            "afade=t=in:st=0:d=0.8",
+            f"afade=t=out:st={fade_out_start}:d={fade_out_dur}",
+        ])
+        audio_filter = ",".join(filters)
         cmd = [
             "ffmpeg", "-y",
             "-i", str(webm_path),
@@ -226,9 +259,10 @@ async def _render_reel_async(
     frames: list[EventFrame],
     audio_path: Path | None,
     audio_start_sec: float,
+    audio_tempo: float,
     top_n: int,
     title: str,
-    subtitle: str,
+    subtitle: list[str] | str,
     intro_lines: list[str] | None,
     intro_duration_sec: float,
     output_name: str,
@@ -278,7 +312,14 @@ async def _render_reel_async(
         )
 
         output_mp4 = OUT_DIR / output_name
-        _mux(webm_path, audio_path, audio_start_sec, output_mp4, target_duration_sec)
+        _mux(
+            webm_path,
+            audio_path,
+            audio_start_sec,
+            audio_tempo,
+            output_mp4,
+            target_duration_sec,
+        )
 
     return RenderResult(
         mp4_path=output_mp4,
@@ -296,20 +337,45 @@ _RU_MONTHS = [
 ]
 
 
-def _ru_date(dt: datetime) -> str:
+def ru_date(dt: datetime) -> str:
+    """Format a date in Russian: '7 июня 2025'."""
     return f"{dt.day} {_RU_MONTHS[dt.month - 1]} {dt.year}"
+
+
+def ru_plural(n: int, one: str, few: str, many: str) -> str:
+    """Russian plural agreement: returns the correct form for n.
+
+    Examples:
+        ru_plural(1, "пост", "поста", "постов") == "пост"
+        ru_plural(2, "пост", "поста", "постов") == "поста"
+        ru_plural(5, "пост", "поста", "постов") == "постов"
+        ru_plural(11, "пост", "поста", "постов") == "постов"  # special case
+        ru_plural(21, "пост", "поста", "постов") == "пост"
+        ru_plural(761, "пост", "поста", "постов") == "пост"   # ends in 1
+    """
+    n = abs(int(n))
+    mod100 = n % 100
+    if 11 <= mod100 <= 14:
+        return many
+    mod10 = n % 10
+    if mod10 == 1:
+        return one
+    if 2 <= mod10 <= 4:
+        return few
+    return many
 
 
 def render_reel(
     top_n: int = 15,
     audio_path: Path | None = DEFAULT_AUDIO,
     audio_start_sec: float = 40.0,
+    audio_tempo: float = 1.5,
     target_duration_sec: float = 120.0,
     intro_duration_sec: float = 4.5,
     pacing: str = "ease-in-out",
     group_name: str = "Материалы",
     title: str | None = None,
-    subtitle: str | None = None,
+    subtitle: list[str] | None = None,
     intro_lines: list[str] | None = None,
     output_name: str | None = None,
 ) -> RenderResult:
@@ -337,19 +403,22 @@ def render_reel(
     n_posts = len(frames)
     n_topics = len({t for f in frames for t in f.counts})
 
+    topic_word = ru_plural(n_topics, "топик", "топика", "топиков")
+    post_word = ru_plural(n_posts, "пост", "поста", "постов")
+
     if title is None:
-        title = f"Популярные темы в «{group_name}»"
+        title = f"Популярные топики в группе «{group_name}»"
     if subtitle is None:
-        subtitle = (
-            f"{_ru_date(start_dt)} — {_ru_date(end_dt)}   •   "
-            f"{n_topics} топиков   •   {n_posts} постов   •   топ-{top_n}"
-        )
+        subtitle = [
+            f"{ru_date(start_dt)} — {ru_date(end_dt)}",
+            f"{n_topics} {topic_word} • {n_posts} {post_word}",
+        ]
     if intro_lines is None:
         intro_lines = [
-            "Статистика моей приватной группы",
-            f"«{group_name}»",
-            "топики, которые обсуждались чаще всего",
-            f"{_ru_date(start_dt)} — {_ru_date(end_dt)}",
+            "Topic Race",
+            "Топ-15 топиков по числу добавленных постов",
+            f"Группа «{group_name}»",
+            f"{ru_date(start_dt)} — {ru_date(end_dt)}",
         ]
 
     if output_name is None:
@@ -365,6 +434,7 @@ def render_reel(
             frames=frames,
             audio_path=audio_path,
             audio_start_sec=audio_start_sec,
+            audio_tempo=audio_tempo,
             top_n=top_n,
             title=title,
             subtitle=subtitle,

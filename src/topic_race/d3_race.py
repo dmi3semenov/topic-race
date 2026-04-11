@@ -39,7 +39,7 @@ def make_d3_race_html(
     transition_ms: int = 120,
     bar_height: int = 36,
     title: str = "Топики — гонка популярности",
-    subtitle: str = "",
+    subtitle: str | Sequence[str] = "",
     layout: str = "landscape",
     hide_controls: bool = False,
     autoplay: bool = False,
@@ -62,7 +62,7 @@ def make_d3_race_html(
         "transition_ms": transition_ms,
         "bar_height": bar_height,
         "title": title,
-        "subtitle": subtitle,
+        "subtitle": list(subtitle) if isinstance(subtitle, (list, tuple)) else subtitle,
         "layout": layout,
         "hide_controls": hide_controls,
         "autoplay": autoplay,
@@ -70,17 +70,44 @@ def make_d3_race_html(
         "intro_lines": list(intro_lines) if intro_lines else None,
         "intro_duration_ms": intro_duration_ms,
     }
-    data_json = json.dumps(payload, ensure_ascii=False)
+    # Escape `</script` and `</style` so user-provided text inside JSON can't
+    # break out of the embedding <script> block.
+    data_json = (
+        json.dumps(payload, ensure_ascii=False)
+        .replace("</script", "<\\/script")
+        .replace("</style", "<\\/style")
+    )
 
     if layout == "vertical":
         height_px = 1920
     else:
         height_px = 80 + 50 + bar_height * top_n + 80
 
+    # Body classes affect initial paint (intro visible from first frame, race hidden).
+    body_classes: list[str] = []
+    if layout == "vertical":
+        body_classes.append("vertical")
+    if hide_controls:
+        body_classes.append("hide-controls")
+    if intro_lines:
+        body_classes.append("has-intro")
+
+    intro_html = ""
+    if intro_lines:
+        parts = []
+        for i, line in enumerate(intro_lines):
+            safe = (
+                line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            parts.append(f'<div class="line l{i}">{safe}</div>')
+        intro_html = "\n".join(parts)
+
     html = (
         _TEMPLATE
         .replace("__DATA_JSON__", data_json)
         .replace("__HEIGHT__", str(height_px))
+        .replace("__BODY_CLASS__", " ".join(body_classes))
+        .replace("__INTRO_CONTENT__", intro_html)
     )
     return html, height_px
 
@@ -141,39 +168,44 @@ _TEMPLATE = r"""
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 24px;
     background: #ffffff;
     z-index: 10;
-    padding: 40px;
+    padding: 60px 40px;
     text-align: center;
-    transition: opacity 0.8s ease-out;
+    transition: opacity 0.7s ease-out;
   }
-  #intro.active { display: flex; }
+  /* If the page is configured with intro, show it immediately (no flash of
+     the race before the intro kicks in). Also hide the race until done. */
+  body.has-intro #intro { display: flex; }
+  body.has-intro .chart-wrap { visibility: hidden; }
+  body.has-intro.intro-done .chart-wrap { visibility: visible; }
+  body.has-intro.intro-done #intro { display: none; }
   #intro.fade-out { opacity: 0; }
   #intro .line {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(16px);
     transition: opacity 0.6s ease-out, transform 0.6s ease-out;
     color: #1a1a1a;
-    line-height: 1.25;
+    line-height: 1.2;
   }
   #intro .line.show { opacity: 1; transform: translateY(0); }
-  #intro .line.l0 { font-size: 44px; font-weight: 600; color: #666; }
-  #intro .line.l1 { font-size: 88px; font-weight: 800; letter-spacing: -0.02em; }
-  #intro .line.l2 { font-size: 40px; font-weight: 500; color: #888; }
-  #intro .line.l3 { font-size: 34px; font-weight: 500; color: #aaa; }
+  #intro .line.l0 { font-size: 110px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 18px; }
+  #intro .line.l1 { font-size: 38px; font-weight: 500; color: #777; margin-bottom: 64px; }
+  #intro .line.l2 { font-size: 56px; font-weight: 700; color: #1a1a1a; margin-bottom: 56px; }
+  #intro .line.l3 { font-size: 34px; font-weight: 500; color: #999; }
   /* Landscape intro is smaller */
-  body:not(.vertical) #intro .line.l0 { font-size: 18px; }
-  body:not(.vertical) #intro .line.l1 { font-size: 36px; }
-  body:not(.vertical) #intro .line.l2 { font-size: 18px; }
-  body:not(.vertical) #intro .line.l3 { font-size: 16px; }
+  body:not(.vertical) #intro { padding: 20px; }
+  body:not(.vertical) #intro .line.l0 { font-size: 42px; margin-bottom: 8px; }
+  body:not(.vertical) #intro .line.l1 { font-size: 16px; margin-bottom: 24px; }
+  body:not(.vertical) #intro .line.l2 { font-size: 24px; margin-bottom: 20px; }
+  body:not(.vertical) #intro .line.l3 { font-size: 14px; }
 
   /* Subtitle under the main title */
   .subtitle { font-size: 13px; fill: #888; font-weight: 500; }
-  body.vertical .subtitle { font-size: 28px; }
+  body.vertical .subtitle { font-size: 30px; font-weight: 500; }
 </style>
 </head>
-<body>
+<body class="__BODY_CLASS__">
 <div class="controls">
   <button id="play">▶ Play</button>
   <button id="pause">⏸ Pause</button>
@@ -190,7 +222,7 @@ _TEMPLATE = r"""
     </select>
   </label>
 </div>
-<div id="intro"></div>
+<div id="intro">__INTRO_CONTENT__</div>
 <div class="chart-wrap"><svg id="chart"></svg></div>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -201,12 +233,17 @@ const BASE_FRAME_MS = DATA.frame_ms;
 const BASE_TRANSITION_MS = DATA.transition_ms;
 const IS_VERTICAL = DATA.layout === "vertical";
 
-// Apply body classes for CSS overrides
-if (IS_VERTICAL) document.body.classList.add("vertical");
-if (DATA.hide_controls) document.body.classList.add("hide-controls");
+// Body classes are already set from Python so first paint is correct;
+// keep the JS add() as a fallback.
+if (IS_VERTICAL && !document.body.classList.contains("vertical")) {
+  document.body.classList.add("vertical");
+}
+if (DATA.hide_controls && !document.body.classList.contains("hide-controls")) {
+  document.body.classList.add("hide-controls");
+}
 
 const margin = IS_VERTICAL
-  ? {top: 140, right: 220, bottom: 60, left: 340}
+  ? {top: 240, right: 140, bottom: 80, left: 320}
   : {top: 44, right: 140, bottom: 24, left: 220};
 const barPadding = IS_VERTICAL ? 14 : 6;
 
@@ -241,16 +278,21 @@ xScale.domain([0, 1]);
 svg.append("text")
   .attr("class", "title")
   .attr("x", margin.left)
-  .attr("y", IS_VERTICAL ? 60 : 20)
+  .attr("y", IS_VERTICAL ? 80 : 20)
   .text(DATA.title);
 
-// Subtitle under title
+// Subtitle under title — accepts either a string or an array of lines.
 if (DATA.subtitle) {
-  svg.append("text")
-    .attr("class", "subtitle")
-    .attr("x", margin.left)
-    .attr("y", IS_VERTICAL ? 100 : 38)
-    .text(DATA.subtitle);
+  const subtitleLines = Array.isArray(DATA.subtitle) ? DATA.subtitle : [DATA.subtitle];
+  const lineH = IS_VERTICAL ? 44 : 16;
+  const startY = IS_VERTICAL ? 140 : 38;
+  subtitleLines.forEach((line, i) => {
+    svg.append("text")
+      .attr("class", "subtitle")
+      .attr("x", margin.left)
+      .attr("y", startY + i * lineH)
+      .text(line);
+  });
 }
 
 // Big date label, bottom-right
@@ -467,18 +509,14 @@ window.addEventListener("resize", () => {
 renderFrame(0, 0);
 
 // ----- Intro overlay animation -----
-function showIntro() {
+// Intro HTML is already rendered server-side and visible from first paint
+// (body.has-intro CSS). We animate lines in, wait, then fade out and reveal
+// the race. Chart stays `visibility: hidden` via CSS until we flip the flag.
+function playIntro() {
   const root = document.getElementById("intro");
   if (!root || !DATA.intro_lines || DATA.intro_lines.length === 0) {
     return Promise.resolve();
   }
-  root.classList.add("active");
-  DATA.intro_lines.forEach((text, i) => {
-    const div = document.createElement("div");
-    div.className = "line l" + i;
-    div.textContent = text;
-    root.appendChild(div);
-  });
   const lines = root.querySelectorAll(".line");
   const dur = DATA.intro_duration_ms || 4000;
   const perLine = Math.min(600, Math.floor(dur / (lines.length + 1)));
@@ -489,9 +527,9 @@ function showIntro() {
     setTimeout(() => {
       root.classList.add("fade-out");
       setTimeout(() => {
-        root.classList.remove("active");
+        document.body.classList.add("intro-done");
         resolve();
-      }, 800);
+      }, 700);
     }, dur);
   });
 }
@@ -512,10 +550,11 @@ function startAutoPlay() {
 }
 
 if (DATA.autoplay) {
-  setTimeout(async () => {
-    await showIntro();
+  // No artificial delay — intro is already on screen from first paint.
+  (async () => {
+    await playIntro();
     startAutoPlay();
-  }, 300);
+  })();
 }
 </script>
 </body>

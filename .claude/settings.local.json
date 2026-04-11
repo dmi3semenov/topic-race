@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p ~/.claude/secrets)",
+      "Bash(chmod 700 ~/.claude/secrets)",
+      "Read(//Users/semyonov/.claude/**)"
+    ]
+  }
+}

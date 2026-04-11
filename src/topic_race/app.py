@@ -119,20 +119,24 @@ st.caption(
     "Ease-out темп: медленно в начале (читаются новые топики), быстро ближе к концу."
 )
 
-col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+col_r1, col_r2, col_r3 = st.columns(3)
 with col_r1:
     reel_duration = st.slider("Длина, сек", 60, 370, 120, step=10, key="reel_dur")
 with col_r2:
-    reel_intro = st.slider("Intro, сек", 0, 10, 4, step=1, key="reel_intro")
+    reel_intro = st.slider("Intro, сек", 0, 10, 5, step=1, key="reel_intro")
 with col_r3:
-    reel_audio_start = st.slider("Старт аудио, сек", 0, 120, 40, step=5, key="reel_audio_start")
-with col_r4:
     reel_pacing = st.selectbox(
         "Темп",
         ["ease-in-out", "ease-out", "linear", "ease-in"],
         index=0,
         key="reel_pacing",
     )
+
+col_r4, col_r5 = st.columns(2)
+with col_r4:
+    reel_audio_start = st.slider("Старт аудио, сек", 0, 300, 40, step=5, key="reel_audio_start")
+with col_r5:
+    reel_audio_tempo = st.slider("Темп аудио", 0.5, 3.0, 1.5, step=0.1, key="reel_audio_tempo")
 
 has_audio = DEFAULT_AUDIO.exists()
 if not has_audio:
@@ -145,6 +149,7 @@ if st.button("🎬 Записать Reels", type="primary"):
                 top_n=int(top_n),
                 audio_path=DEFAULT_AUDIO if has_audio else None,
                 audio_start_sec=float(reel_audio_start),
+                audio_tempo=float(reel_audio_tempo),
                 target_duration_sec=float(reel_duration),
                 intro_duration_sec=float(reel_intro),
                 pacing=reel_pacing,
