@@ -1,0 +1,24 @@
+[project]
+name = "topic-race"
+version = "0.1.0"
+description = "Bar chart race visualization for Telegram forum topics"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bar-chart-race>=0.1.0",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.2",
+    "playwright>=1.58.0",
+    "plotly>=6.7.0",
+    "python-dotenv>=1.2.2",
+    "streamlit>=1.56.0",
+    "telethon>=1.43.0",
+    "yt-dlp>=2026.3.17",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/topic_race"]

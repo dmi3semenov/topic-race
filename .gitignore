@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets & sessions
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+
+# Local data & output
+cache.db
+out/
+data/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
