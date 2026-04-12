@@ -1,5 +1,7 @@
 # Topic Race
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/dmi3semenov/topic-race/blob/main/topic_race_colab.ipynb)
+
 Bar chart race для топиков Telegram-группы — анимированный рейтинг топиков
 по числу добавленных постов за всю историю. На выходе — вертикальное Reels-видео
 (1080×1920) с музыкой, intro-слайдом и плавным outro.
