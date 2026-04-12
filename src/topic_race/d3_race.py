@@ -38,7 +38,7 @@ def make_d3_race_html(
     frame_ms: int = 120,
     transition_ms: int = 120,
     bar_height: int = 36,
-    title: str = "Топики — гонка популярности",
+    title: str | Sequence[str] = "Топики — гонка популярности",
     subtitle: str | Sequence[str] = "",
     layout: str = "landscape",
     hide_controls: bool = False,
@@ -46,6 +46,8 @@ def make_d3_race_html(
     frame_durations: Sequence[int] | None = None,
     intro_lines: Sequence[str] | None = None,
     intro_duration_ms: int = 4000,
+    pre_race_pause_ms: int = 0,
+    outro_hold_ms: int = 0,
 ) -> tuple[str, int]:
     """Return (html, height_px). height_px is what to pass to st.components.v1.html.
 
@@ -61,7 +63,7 @@ def make_d3_race_html(
         "frame_ms": frame_ms,
         "transition_ms": transition_ms,
         "bar_height": bar_height,
-        "title": title,
+        "title": list(title) if isinstance(title, (list, tuple)) else title,
         "subtitle": list(subtitle) if isinstance(subtitle, (list, tuple)) else subtitle,
         "layout": layout,
         "hide_controls": hide_controls,
@@ -69,6 +71,8 @@ def make_d3_race_html(
         "frame_durations": list(frame_durations) if frame_durations else None,
         "intro_lines": list(intro_lines) if intro_lines else None,
         "intro_duration_ms": intro_duration_ms,
+        "pre_race_pause_ms": pre_race_pause_ms,
+        "outro_hold_ms": outro_hold_ms,
     }
     # Escape `</script` and `</style` so user-provided text inside JSON can't
     # break out of the embedding <script> block.
@@ -151,13 +155,21 @@ _TEMPLATE = r"""
   .axis text { font-size: 11px; fill: #888; }
   .axis path, .axis line { stroke: #e5e5e5; }
   .title { font-size: 16px; fill: #333; font-weight: 700; }
+  /* When title is rendered as multiple lines, line 0 is lighter & smaller
+     and line 1 is the bigger brand anchor (e.g. group name). */
+  .title.l0 { font-size: 15px; fill: #666; font-weight: 500; }
+  .title.l1 { font-size: 17px; fill: #1a1a1a; font-weight: 800; }
   /* Vertical mode (9:16) — bigger fonts, no padding, bars fill the viewport */
   body.vertical .chart-wrap { padding: 0; }
   body.vertical .bar-label { font-size: 26px; }
   body.vertical .bar-value { font-size: 26px; }
   body.vertical .date-big { font-size: 120px; }
   body.vertical .axis text { font-size: 22px; }
-  body.vertical .title { font-size: 36px; }
+  body.vertical .title { font-size: 28px; font-weight: 700; fill: #1a1a1a; }
+  /* Multi-line title styling — kept for backward compatibility but not used
+     in the default single-line vertical layout. */
+  body.vertical .title.l0 { font-size: 28px; fill: #555; font-weight: 500; }
+  body.vertical .title.l1 { font-size: 38px; fill: #1a1a1a; font-weight: 800; }
   body.hide-controls .controls { display: none; }
 
   /* Intro overlay */
@@ -174,12 +186,18 @@ _TEMPLATE = r"""
     text-align: center;
     transition: opacity 0.7s ease-out;
   }
-  /* If the page is configured with intro, show it immediately (no flash of
-     the race before the intro kicks in). Also hide the race until done. */
+  /* When the page is configured with intro, show the overlay immediately so
+     it covers the race chart from the very first paint. The overlay is opaque
+     white and z-index 10, so we don't need to hide the chart underneath —
+     trying to hide it via `visibility: hidden` interacts badly with headless
+     Chromium and leaves the chart blank when we later flip it visible. */
   body.has-intro #intro { display: flex; }
-  body.has-intro .chart-wrap { visibility: hidden; }
-  body.has-intro.intro-done .chart-wrap { visibility: visible; }
   body.has-intro.intro-done #intro { display: none; }
+  /* Outro hold: a subtle vignette frame around the chart for the final beat. */
+  body.outro-active .chart-wrap {
+    box-shadow: inset 0 0 0 6px #c8a64a;
+    transition: box-shadow 0.5s ease-in;
+  }
   #intro.fade-out { opacity: 0; }
   #intro .line {
     opacity: 0;
@@ -243,7 +261,7 @@ if (DATA.hide_controls && !document.body.classList.contains("hide-controls")) {
 }
 
 const margin = IS_VERTICAL
-  ? {top: 240, right: 140, bottom: 80, left: 320}
+  ? {top: 260, right: 60, bottom: 80, left: 280}
   : {top: 44, right: 140, bottom: 24, left: 220};
 const barPadding = IS_VERTICAL ? 14 : 6;
 
@@ -274,18 +292,25 @@ const xScale = d3.scaleLinear().range([margin.left, width - margin.right]);
 // Start with a small domain; we expand it per-frame to the current leader * 1.1
 xScale.domain([0, 1]);
 
-// Title
-svg.append("text")
-  .attr("class", "title")
-  .attr("x", margin.left)
-  .attr("y", IS_VERTICAL ? 80 : 20)
-  .text(DATA.title);
+// Title — supports a string or array of lines. When a list, CSS classes
+// .title.l0 / .title.l1 apply distinct styling (l1 is the bigger anchor).
+const titleLines = Array.isArray(DATA.title) ? DATA.title : [DATA.title];
+const titleStartY = IS_VERTICAL ? 80 : 20;
+const titleLineH = IS_VERTICAL ? 58 : 20;
+titleLines.forEach((line, i) => {
+  svg.append("text")
+    .attr("class", "title l" + i)
+    .attr("x", margin.left)
+    .attr("y", titleStartY + i * titleLineH)
+    .text(line);
+});
+const titleBottomY = titleStartY + (titleLines.length - 1) * titleLineH;
 
 // Subtitle under title — accepts either a string or an array of lines.
 if (DATA.subtitle) {
   const subtitleLines = Array.isArray(DATA.subtitle) ? DATA.subtitle : [DATA.subtitle];
   const lineH = IS_VERTICAL ? 44 : 16;
-  const startY = IS_VERTICAL ? 140 : 38;
+  const startY = titleBottomY + (IS_VERTICAL ? 60 : 18);
   subtitleLines.forEach((line, i) => {
     svg.append("text")
       .attr("class", "subtitle")
@@ -510,8 +535,8 @@ renderFrame(0, 0);
 
 // ----- Intro overlay animation -----
 // Intro HTML is already rendered server-side and visible from first paint
-// (body.has-intro CSS). We animate lines in, wait, then fade out and reveal
-// the race. Chart stays `visibility: hidden` via CSS until we flip the flag.
+// (body.has-intro CSS). All lines fade in together (no stagger), we hold the
+// slide, then fade out and reveal the race.
 function playIntro() {
   const root = document.getElementById("intro");
   if (!root || !DATA.intro_lines || DATA.intro_lines.length === 0) {
@@ -519,11 +544,11 @@ function playIntro() {
   }
   const lines = root.querySelectorAll(".line");
   const dur = DATA.intro_duration_ms || 4000;
-  const perLine = Math.min(600, Math.floor(dur / (lines.length + 1)));
   return new Promise(resolve => {
-    lines.forEach((el, i) => {
-      setTimeout(() => el.classList.add("show"), perLine * (i + 0.2));
-    });
+    // All lines fade in simultaneously (CSS transition handles the fade).
+    setTimeout(() => {
+      lines.forEach(el => el.classList.add("show"));
+    }, 100);
     setTimeout(() => {
       root.classList.add("fade-out");
       setTimeout(() => {
@@ -540,8 +565,14 @@ function startAutoPlay() {
   (function loopAuto() {
     if (!playing) return;
     if (currentIdx >= DATA.frames.length - 1) {
-      window.__animationDone = true;
-      playing = false;
+      // Final frame reached. Hold it for outro_hold_ms with a vignette,
+      // then signal animation done so the recorder can stop.
+      const hold = DATA.outro_hold_ms || 0;
+      document.body.classList.add("outro-active");
+      setTimeout(() => {
+        window.__animationDone = true;
+        playing = false;
+      }, hold);
       return;
     }
     renderFrame(currentIdx + 1, effectiveTransitionMs());
@@ -553,6 +584,13 @@ if (DATA.autoplay) {
   // No artificial delay — intro is already on screen from first paint.
   (async () => {
     await playIntro();
+    // Hold the first race frame for a beat so the viewer can focus on the
+    // initial state (usually a single bar for the first topic) before the
+    // animation kicks off.
+    const pause = DATA.pre_race_pause_ms || 0;
+    if (pause > 0) {
+      await new Promise(r => setTimeout(r, pause));
+    }
     startAutoPlay();
   })();
 }

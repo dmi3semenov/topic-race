@@ -73,9 +73,9 @@ def build_schedule(
     n_frames: int,
     total_ms: float,
     pacing: str = "ease-in-out",
-    start_mult: float = 1.6,
+    start_mult: float = 4.0,
     end_mult: float = 2.6,
-    intro_frac: float = 0.15,
+    intro_frac: float = 0.04,
     outro_frac: float = 0.15,
     min_ms: int = 40,
 ) -> list[int]:
@@ -188,6 +188,66 @@ def _atempo_chain(tempo: float) -> str:
     return ",".join(filters)
 
 
+def build_variable_tempo_filter(
+    audio_start_sec: float,
+    target_duration_sec: float,
+    intro_sec: float = 10.0,
+    intro_tempo: float = 1.0,
+    main_tempo: float = 2.0,
+    outro_sec: float = 8.0,
+    outro_tempo: float = 1.0,
+    volume: float = 0.55,
+    fade_out_sec: float = 6.0,
+    audio_input_label: str = "0:a",
+) -> tuple[str, list[str]]:
+    """Build an ffmpeg filter_complex string for variable-tempo audio.
+
+    The output has three segments in *output time*:
+      1) intro_sec at intro_tempo (usually 1.0x — normal speed)
+      2) main_duration at main_tempo (usually 2.0x — fast, the race burns through)
+      3) outro_sec at outro_tempo (usually 0.6x — slow dramatic finale)
+
+    Segments are cut from the source audio starting at audio_start_sec.
+    Each segment consumes `seg_out * seg_tempo` seconds of source time.
+
+    Returns (filter_complex_string, output_label_list). The label to map as the
+    audio output is the last element of output_label_list.
+    """
+    if main_tempo <= 0 or intro_tempo <= 0 or outro_tempo <= 0:
+        raise ValueError("Tempos must be positive")
+    if intro_sec + outro_sec >= target_duration_sec:
+        raise ValueError(
+            f"intro+outro ({intro_sec + outro_sec}s) must be < target "
+            f"({target_duration_sec}s)"
+        )
+
+    main_out_sec = target_duration_sec - intro_sec - outro_sec
+
+    # Source offsets: how much source time each output segment consumes.
+    src_intro_start = audio_start_sec
+    src_intro_end = src_intro_start + intro_sec * intro_tempo
+    src_main_end = src_intro_end + main_out_sec * main_tempo
+    src_outro_end = src_main_end + outro_sec * outro_tempo
+
+    fade_out_start = max(0.0, target_duration_sec - fade_out_sec)
+
+    a = f"[{audio_input_label}]"
+    parts = [
+        f"{a}atrim={_fmt_tempo(src_intro_start)}:{_fmt_tempo(src_intro_end)},"
+        f"asetpts=PTS-STARTPTS,{_atempo_chain(intro_tempo) or 'anull'}[s1]",
+        f"{a}atrim={_fmt_tempo(src_intro_end)}:{_fmt_tempo(src_main_end)},"
+        f"asetpts=PTS-STARTPTS,{_atempo_chain(main_tempo) or 'anull'}[s2]",
+        f"{a}atrim={_fmt_tempo(src_main_end)}:{_fmt_tempo(src_outro_end)},"
+        f"asetpts=PTS-STARTPTS,{_atempo_chain(outro_tempo) or 'anull'}[s3]",
+        f"[s1][s2][s3]concat=n=3:v=0:a=1[cat]",
+        f"[cat]volume={volume},"
+        f"afade=t=in:st=0:d=0.8,"
+        f"afade=t=out:st={_fmt_tempo(fade_out_start)}:d={_fmt_tempo(fade_out_sec)}"
+        f"[aout]",
+    ]
+    return ";".join(parts), ["aout"]
+
+
 def _mux(
     webm_path: Path,
     audio_path: Path | None,
@@ -195,40 +255,43 @@ def _mux(
     audio_tempo: float,
     output_mp4: Path,
     target_duration_sec: float,
+    intro_normal_sec: float = 10.0,
+    outro_slow_sec: float = 8.0,
+    outro_tempo: float = 1.0,
+    fade_out_sec: float = 6.0,
 ) -> None:
     """Convert webm to mp4 (h264) and optionally overlay an audio track.
 
-    If audio_path is None, just transcode video. If audio_path is given, trim
-    audio to start at audio_start_sec, speed up by audio_tempo, and cut at
-    target_duration_sec. Audio is volume-reduced with fade in/out.
+    Audio has 3 segments in output time:
+      - first `intro_normal_sec` at 1.0x (normal speed — the intro card)
+      - middle at `audio_tempo` (fast main section)
+      - last `outro_slow_sec` at `outro_tempo` (slow finale, natural tail)
     """
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
     if output_mp4.exists():
         output_mp4.unlink()
 
     if audio_path and audio_path.exists():
-        # Audio filter chain: tempo first (changes timing), then volume + fades.
-        fade_out_dur = 2.0
-        fade_out_start = max(0.0, target_duration_sec - fade_out_dur)
-        filters = []
-        atempo = _atempo_chain(audio_tempo)
-        if atempo:
-            filters.append(atempo)
-        filters.extend([
-            "volume=0.55",
-            "afade=t=in:st=0:d=0.8",
-            f"afade=t=out:st={fade_out_start}:d={fade_out_dur}",
-        ])
-        audio_filter = ",".join(filters)
+        # Input #0 is webm video (no audio), input #1 is the audio file.
+        filter_complex, labels = build_variable_tempo_filter(
+            audio_start_sec=audio_start_sec,
+            target_duration_sec=target_duration_sec,
+            intro_sec=intro_normal_sec,
+            intro_tempo=1.0,
+            main_tempo=audio_tempo,
+            outro_sec=outro_slow_sec,
+            outro_tempo=outro_tempo,
+            fade_out_sec=fade_out_sec,
+            audio_input_label="1:a",
+        )
         cmd = [
             "ffmpeg", "-y",
             "-i", str(webm_path),
-            "-ss", f"{audio_start_sec}",
             "-i", str(audio_path),
-            "-t", f"{target_duration_sec}",
+            "-filter_complex", filter_complex,
             "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-af", audio_filter,
+            "-map", f"[{labels[-1]}]",
+            "-t", f"{target_duration_sec}",
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
             "-preset", "medium",
@@ -260,11 +323,17 @@ async def _render_reel_async(
     audio_path: Path | None,
     audio_start_sec: float,
     audio_tempo: float,
+    audio_intro_sec: float,
+    audio_outro_sec: float,
+    audio_outro_tempo: float,
+    audio_fade_out_sec: float,
     top_n: int,
-    title: str,
+    title: str | list[str],
     subtitle: list[str] | str,
     intro_lines: list[str] | None,
     intro_duration_sec: float,
+    pre_race_pause_sec: float,
+    outro_hold_sec: float,
     output_name: str,
     target_duration_sec: float,
     pacing: str,
@@ -273,12 +342,14 @@ async def _render_reel_async(
     if n == 0:
         raise ValueError("No event frames to render")
 
-    # target_duration_sec is the whole video (intro + race). Race gets the rest.
-    race_duration_sec = max(5.0, target_duration_sec - intro_duration_sec)
-    race_total_ms = race_duration_sec * 1000
+    # Total video timeline:
+    #   intro_card → pre_race_pause (LLM=1 visible) → scheduled race → outro_hold
+    race_total_sec = max(5.0, target_duration_sec - intro_duration_sec)
+    scheduled_race_sec = max(5.0, race_total_sec - pre_race_pause_sec - outro_hold_sec)
+    scheduled_ms = scheduled_race_sec * 1000
 
-    schedule = build_schedule(n, race_total_ms, pacing=pacing)
-    mean_frame_ms = max(20, int(round(race_total_ms / n)))
+    schedule = build_schedule(n, scheduled_ms, pacing=pacing)
+    mean_frame_ms = max(20, int(round(scheduled_ms / n)))
 
     html, _ = make_d3_race_html(
         frames,
@@ -293,6 +364,8 @@ async def _render_reel_async(
         frame_durations=schedule,
         intro_lines=intro_lines,
         intro_duration_ms=int(intro_duration_sec * 1000),
+        pre_race_pause_ms=int(pre_race_pause_sec * 1000),
+        outro_hold_ms=int(outro_hold_sec * 1000),
     )
 
     with tempfile.TemporaryDirectory(prefix="topic_race_") as td:
@@ -319,6 +392,10 @@ async def _render_reel_async(
             audio_tempo,
             output_mp4,
             target_duration_sec,
+            intro_normal_sec=audio_intro_sec,
+            outro_slow_sec=audio_outro_sec,
+            outro_tempo=audio_outro_tempo,
+            fade_out_sec=audio_fade_out_sec,
         )
 
     return RenderResult(
@@ -369,12 +446,18 @@ def render_reel(
     top_n: int = 15,
     audio_path: Path | None = DEFAULT_AUDIO,
     audio_start_sec: float = 40.0,
-    audio_tempo: float = 1.5,
-    target_duration_sec: float = 120.0,
+    audio_tempo: float = 1.3,
+    audio_intro_sec: float = 25.0,
+    audio_outro_sec: float = 8.0,
+    audio_outro_tempo: float = 1.0,
+    audio_fade_out_sec: float = 6.0,
+    target_duration_sec: float = 131.0,
     intro_duration_sec: float = 4.5,
+    pre_race_pause_sec: float = 3.0,
+    outro_hold_sec: float = 11.0,
     pacing: str = "ease-in-out",
     group_name: str = "Материалы",
-    title: str | None = None,
+    title: str | list[str] | None = None,
     subtitle: list[str] | None = None,
     intro_lines: list[str] | None = None,
     output_name: str | None = None,
@@ -407,7 +490,7 @@ def render_reel(
     post_word = ru_plural(n_posts, "пост", "поста", "постов")
 
     if title is None:
-        title = f"Популярные топики в группе «{group_name}»"
+        title = f"Топ-15 топиков в группе «{group_name}»"
     if subtitle is None:
         subtitle = [
             f"{ru_date(start_dt)} — {ru_date(end_dt)}",
@@ -435,11 +518,17 @@ def render_reel(
             audio_path=audio_path,
             audio_start_sec=audio_start_sec,
             audio_tempo=audio_tempo,
+            audio_intro_sec=audio_intro_sec,
+            audio_outro_sec=audio_outro_sec,
+            audio_outro_tempo=audio_outro_tempo,
+            audio_fade_out_sec=audio_fade_out_sec,
             top_n=top_n,
             title=title,
             subtitle=subtitle,
             intro_lines=intro_lines,
             intro_duration_sec=intro_duration_sec,
+            pre_race_pause_sec=pre_race_pause_sec,
+            outro_hold_sec=outro_hold_sec,
             output_name=output_name,
             target_duration_sec=target_duration_sec,
             pacing=pacing,
