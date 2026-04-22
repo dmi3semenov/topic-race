@@ -44,14 +44,18 @@ uv run playwright install chromium
 
 ### 2. Настройка Telegram
 
-Создайте `.env` по образцу `.env.example`:
+Credentials (`TG_API_ID`, `TG_API_HASH`, `TG_PHONE`) читаются из shell
+env — обычно их уже выставил `~/.zshrc` через auto-source из
+`~/.claude/secrets/telegram.env`. Ничего копировать не нужно.
 
-```bash
-cp .env.example .env
-```
+Project-specific переменные (`TG_GROUP_NAME` — название форумной
+группы, `TG_SESSION_NAME` — имя сессионного файла Telethon) лежат
+прямо в `.env` в корне проекта. Можешь отредактировать под свою
+группу.
 
-Заполните `TG_API_ID`, `TG_API_HASH` (из [my.telegram.org](https://my.telegram.org))
-и `TG_PHONE`. Укажите в `TG_GROUP_NAME` название вашей форумной группы.
+Для запуска без shell (CI / Docker / launchd) — скопируй
+`.env.example` в `.env`, раскомментируй credentials и заполни из
+`~/.claude/secrets/telegram.env`.
 
 Первая авторизация — интерактивная (нужен код из Telegram):
 
